@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pixel Fish Smorgasbord</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0e0f14; color: #d8d9e0; font: 14px/1.45 system-ui, sans-serif; }
+  header { padding: 28px 24px 8px; max-width: 1280px; margin: 0 auto; }
+  h1 { margin: 0 0 6px; font-size: 26px; }
+  header p { margin: 0; color: #9a9db0; }
+  .grid { display: grid; gap: 18px; padding: 18px 24px 48px; max-width: 1280px; margin: 0 auto; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); }
+  .card { background: #161824; border: 1px solid #23263a; border-radius: 12px; overflow: hidden; }
+  .card .top { display: flex; align-items: baseline; justify-content: space-between; padding: 10px 12px 6px; }
+  .card h2 { margin: 0; font-size: 15px; font-weight: 600; }
+  .card .note { padding: 0 12px 10px; color: #8f92a6; font-size: 12.5px; }
+  .card canvas { display: block; width: 100%; image-rendering: pixelated; }
+  .card .big { height: 120px; background: linear-gradient(#1b4f86, #0f2f5a); }
+  .card .school { height: 70px; background: linear-gradient(#0f2f5a, #0a2244); border-top: 1px solid #ffffff10; }
+  .star { background: none; border: 0; color: #4a4d63; font-size: 18px; cursor: pointer; line-height: 1; padding: 0 2px; }
+  .star.on { color: #ffcc4d; }
+  .ctl { display: flex; gap: 14px; align-items: center; padding: 6px 24px 0; max-width: 1280px; margin: 0 auto; color: #9a9db0; font-size: 13px; }
+  .ctl label { display: flex; gap: 6px; align-items: center; cursor: pointer; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Pixel Fish Smorgasbord</h1>
+  <p>Sprites as character grids, 3-frame tail wag. Top: zoomed. Bottom: a school at roughly lamp size, so you can judge readability.</p>
+</header>
+<div class="ctl">
+  <label><input type="checkbox" id="outline" checked> dark outline</label>
+  <label>school scale <input type="range" id="scale" min="1" max="4" step="1" value="2"> <span id="scaleV">2×</span></label>
+</div>
+<div class="grid" id="grid"></div>
+
+<script>
+'use strict';
+// Palette: one letter per color. '.' = transparent. 'k' pupil is always near-black.
+const PAL = {
+  o: '#ff7a1f', O: '#c94f0a', w: '#ffffff', k: '#111116', y: '#ffd21f', Y: '#d9a400', b: '#2f6df6', B: '#1a3fa8',
+  r: '#e8342d', g: '#8f98a6', G: '#5c6570', l: '#c9d3de', n: '#101c3a', s: '#dfe6ee', p: '#ff6fb0', P: '#c93a7c',
+  t: '#2fc4b2', T: '#1a8a7c', v: '#8c5cf6', V: '#5a33b8', m: '#ff3fa0', c: '#4fe3ff', a: '#c9a36a', A: '#8b6a3a',
+  d: '#3a2a1a', e: '#f4f4f4', i: '#55ff55', x: '#ff9d3a', q: '#fff1a8',
+};
+const FISH = [
+  { name: 'Clownfish', note: 'Two white bands, black-edged. Reads as a clownfish even at 1×.', tail: 3, rows: [
+    '..............',
+    '.o...ooooo....',
+    'oo..oowoooo...',
+    'oo.ooowooooo..',
+    'oo.owwoooooeo.',
+    'oo.ooowooooo..',
+    'oo..oowoooo...',
+    '.o...ooooo....',
+    '..............' ] },
+  { name: 'Yellow tang', note: 'Tall rhombus body, tiny tail. Bright single color, very legible.', tail: 2, rows: [
+    '.......y.....',
+    '......yyyy...',
+    '.....yyyyyy..',
+    'y...yyyyyyyy.',
+    'yy.yyyyyyyyyy',
+    'yy.yyyyyyykyy',
+    'y...yyyyyyyy.',
+    '.....yyyyyy..',
+    '......yyyy...',
+    '.......y.....' ] },
+  { name: 'Blue tang', note: 'Dory shape: blue with a black swoosh and yellow tail.', tail: 3, rows: [
+    '..............',
+    '.y...bbbbbb...',
+    'yy..bbkkkbbb..',
+    'yy.bbbbbkkbbb.',
+    'yy.bbbbbbbkeb.',
+    'yy.bbbbbkkbbb.',
+    'yy..bbkkkbbb..',
+    '.y...bbbbbb...',
+    '..............' ] },
+  { name: 'Neon tetra', note: 'Tiny and slim; electric blue stripe over red. Great for dense schools.', tail: 2, rows: [
+    '..........',
+    's....ssss.',
+    'ss.sccccce',
+    'ss.srrrss.',
+    's....ssss.',
+    '..........' ] },
+  { name: 'Goldfish', note: 'Round body, big flowing double tail.', tail: 4, rows: [
+    '.x............',
+    'xx.....xxxx...',
+    '.xx..xxxxxxx..',
+    '..xxxxxxxxxxx.',
+    '.xx.xxxxxxxex.',
+    'xx..xxxxxxxxx.',
+    '.xx..xxxxxxx..',
+    'xx.....xxxx...',
+    '.x............' ] },
+  { name: 'Angelfish', note: 'Tall triangle with long dorsal/anal fins and dark vertical stripes.', tail: 3, rows: [
+    '......s.......',
+    '.....ss.......',
+    '....ssks......',
+    '...sskksss....',
+    's..skksssss...',
+    'ss.sskksssses.',
+    's..skksssss...',
+    '...sskksss....',
+    '....ssks......',
+    '.....ss.......',
+    '......s.......' ] },
+  { name: 'Betta', note: 'Long, ragged flowing fins. Magenta-violet.', tail: 5, rows: [
+    '...mm.........',
+    '.mmmm.mmmm....',
+    'mmmmm.mmmmmm..',
+    'mmmmmmvvvvvvm.',
+    '.mmmmmvvvvvvem',
+    'mmmmmmvvvvvvm.',
+    'mmmmm.mmmmmm..',
+    '.mmmm.mmmm....',
+    '...mm.........' ] },
+  { name: 'Guppy', note: 'Small silver body, oversized rainbow fan tail.', tail: 4, rows: [
+    '..........',
+    'yyy.......',
+    'oooo..sss.',
+    'rrrr.sssse',
+    'vvvv..sss.',
+    'bbb.......',
+    '..........' ] },
+  { name: 'Pufferfish', note: 'Round, spiky, big worried eyes. Could puff up when scared!', tail: 2, rows: [
+    '....a.a.a.....',
+    '...aaaaaaa....',
+    '..aqqqqqqqa...',
+    'a.aqqqqqqqqa..',
+    'aaaqqqqekqqa..',
+    'a.aqqqqqqqqa..',
+    '..aqqqqqqqa...',
+    '...aaaaaaa....',
+    '....a.a.a.....' ] },
+  { name: 'Catfish', note: 'Flat-headed bottom dweller with whiskers. Brown and tan.', tail: 3, rows: [
+    '..............',
+    'A....AAAAAA...',
+    'AA.AAaaaaaaAA.',
+    'AA.AaaaaaaaAe.',
+    'AA.AAaaaaaaAA.',
+    'A....AAAAAA...',
+    '..........a.a.',
+    '..............' ] },
+  { name: 'Moorish idol', note: 'Black / white / yellow bands, tall body, long trailing dorsal.', tail: 2, rows: [
+    '............y.',
+    '..........yyy.',
+    '.....yyyyyyy..',
+    '....kkyywwww..',
+    'k..kkkkyywwww.',
+    'kk.kkkkyywwek.',
+    'k..kkkkyywwww.',
+    '....kkyywwww..',
+    '.....yyyyyyy..',
+    '............' .padEnd(14, '.') ] },
+  { name: 'Koi', note: 'White with orange patches; long body. Calm and pond-like.', tail: 3, rows: [
+    '..............',
+    's....sssooos..',
+    'ss.sssoooosss.',
+    'ss.ssssssoose.',
+    'ss.soossssoss.',
+    's....oosssss..',
+    '..............' ] },
+  { name: 'Discus', note: 'Nearly circular disc with wavy stripes. Teal & pink.', tail: 2, rows: [
+    '.....tttt.....',
+    '...ttptttpt...',
+    '..tptttptttp..',
+    't.tttptttptt..',
+    'ttttptttptte..',
+    't.tttptttptt..',
+    '..tptttptttp..',
+    '...ttptttpt...',
+    '.....tttt.....' ] },
+  { name: 'Minnow', note: 'Absolute minimum: 8×3 dark slip. Almost a boid triangle. Thousands of these would be very OG.', tail: 2, rows: [
+    'n...nnnn.',
+    'nn.nnnnne',
+    'n...nnnn.' ] },
+  { name: 'Seahorse', note: 'Not a schooler, but bobbing upright and drifting would be adorable.', tail: 0, upright: true, rows: [
+    '....yyyy..',
+    '...yyyyyy.',
+    '...yeyyyy.',
+    '....yyyyyy',
+    '.....yyy..',
+    '....yyyy..',
+    '...yyyyy..',
+    '..yyyyy...',
+    '..yyyy....',
+    '...yyy....',
+    '..yyyy....',
+    '.yy.......' ] },
+  { name: 'Shark (predator)', note: 'Pixel shark for the cursor, ~2× fish size here (bigger in the lamp).', tail: 4, rows: [
+    '.....g......g............',
+    '....gg.....ggg...........',
+    '...ggg....ggggg..........',
+    '..gggg...gggggggg........',
+    '.ggggg.gggggggggggggg....',
+    'gggggggggggggggggggggggg.',
+    '.ggggglllllllllllllllleg.',
+    '...ggglllllllllllllwwwww.',
+    '.....gllllll.llllllll....',
+    '......ll......ll.........' ] },
+];
+
+// ---------------------------------------------------------------------------
+function frameRows(f, frame) {           // frame: 0 = rest, 1 = tail up, 2 = tail down
+  if (!f.tail || frame === 0) return f.rows;
+  const h = f.rows.length, out = f.rows.map(r => r.split(''));
+  const dy = frame === 1 ? -1 : 1;
+  for (let y = 0; y < h; y++) for (let x = 0; x < f.tail; x++) {
+    const sy = y - dy; out[y][x] = (sy >= 0 && sy < h) ? f.rows[sy][x] : '.';
+  }
+  return out.map(r => r.join(''));
+}
+function drawSprite(c, f, x, y, px, frame, outline, flip) {
+  const rows = frameRows(f, frame), h = rows.length, w = rows[0].length;
+  const at = (xx, yy) => (xx >= 0 && yy >= 0 && yy < h && xx < w) ? rows[yy][xx] : '.';
+  c.save(); c.translate(x, y); if (flip) { c.translate(w * px, 0); c.scale(-1, 1); }
+  if (outline) {
+    c.fillStyle = '#0a0c14';
+    for (let yy = -1; yy <= h; yy++) for (let xx = -1; xx <= w; xx++) {
+      if (at(xx, yy) !== '.') continue;
+      if (at(xx - 1, yy) !== '.' || at(xx + 1, yy) !== '.' || at(xx, yy - 1) !== '.' || at(xx, yy + 1) !== '.') c.fillRect(xx * px, yy * px, px, px);
+    }
+  }
+  for (let yy = 0; yy < h; yy++) for (let xx = 0; xx < w; xx++) {
+    const ch = rows[yy][xx]; if (ch === '.') continue;
+    if (ch === 'e') { c.fillStyle = PAL.e; c.fillRect(xx * px, yy * px, px, px); c.fillStyle = PAL.k; c.fillRect(xx * px + px * .35, yy * px + px * .2, px * .6, px * .6); continue; }
+    c.fillStyle = PAL[ch] || '#f0f'; c.fillRect(xx * px, yy * px, px, px);
+  }
+  c.restore();
+}
+
+const grid = document.getElementById('grid');
+const outlineBox = document.getElementById('outline'), scaleIn = document.getElementById('scale'), scaleV = document.getElementById('scaleV');
+scaleIn.addEventListener('input', () => scaleV.textContent = scaleIn.value + '×');
+let stars = {}; try { stars = JSON.parse(localStorage.getItem('pixelfish-stars') || '{}'); } catch (e) {}
+const cards = [];
+for (const f of FISH) {
+  const bad = f.rows.find(r => r.length !== f.rows[0].length); if (bad) console.warn('ragged sprite', f.name, bad);
+  const card = document.createElement('div'); card.className = 'card';
+  card.innerHTML = `<div class="top"><h2></h2><button class="star">★</button></div><canvas class="big"></canvas><canvas class="school"></canvas><div class="note"></div>`;
+  card.querySelector('h2').textContent = f.name; card.querySelector('.note').textContent = f.note;
+  const star = card.querySelector('.star'); if (stars[f.name]) star.classList.add('on');
+  star.addEventListener('click', () => { stars[f.name] = !stars[f.name]; star.classList.toggle('on', !!stars[f.name]); try { localStorage.setItem('pixelfish-stars', JSON.stringify(stars)); } catch (e) {} });
+  grid.appendChild(card);
+  const school = Array.from({ length: 9 }, (_, i) => ({ x: Math.random(), y: 0.15 + Math.random() * 0.7, v: 0.05 + Math.random() * 0.06, ph: Math.random() * 6.28, fr: Math.random() * 3 }));
+  cards.push({ f, big: card.querySelector('.big'), sch: card.querySelector('.school'), school });
+}
+function fit(cv) { const dpr = window.devicePixelRatio || 1, r = cv.getBoundingClientRect(); if (cv.width !== Math.round(r.width * dpr)) { cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr); } const c = cv.getContext('2d'); c.setTransform(dpr, 0, 0, dpr, 0, 0); c.imageSmoothingEnabled = false; return [c, r.width, r.height]; }
+function frame(now) {
+  const t = now / 1000, outline = outlineBox.checked, ss = +scaleIn.value;
+  for (const k of cards) {
+    const f = k.f, w = f.rows[0].length, h = f.rows.length;
+    let [c, W, H] = fit(k.big); c.clearRect(0, 0, W, H);
+    const px = Math.min(12, Math.floor(Math.min((H - 16) / h, (W - 40) / w)));
+    const fr = [0, 1, 0, 2][Math.floor(t * 6) % 4];
+    drawSprite(c, f, Math.round((W - w * px) / 2), Math.round((H - h * px) / 2) + (f.upright ? Math.sin(t * 2) * 4 : 0), px, fr, outline, false);
+    [c, W, H] = fit(k.sch); c.clearRect(0, 0, W, H);
+    for (const s of k.school) {
+      s.x = (s.x + s.v * 0.016) % 1.15;
+      const fr2 = [0, 1, 0, 2][Math.floor(t * 8 + s.fr) % 4];
+      const y = s.y * H + Math.sin(t * 1.5 + s.ph) * 4;
+      drawSprite(c, f, Math.round(s.x * W - w * ss - 10), Math.round(y - h * ss / 2), ss, fr2, outline, false);
+    }
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

@@ -1,0 +1,571 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Little Guys Smorgasbord</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; background: #0e0f14; color: #d8d9e0;
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header { padding: 28px 24px 8px; max-width: 1280px; margin: 0 auto; }
+  h1 { margin: 0 0 6px; font-size: 26px; letter-spacing: .3px; }
+  header p { margin: 0; color: #9a9db0; }
+  header kbd { background: #1e2030; border: 1px solid #2f3247; border-radius: 4px; padding: 1px 6px; font-size: 12px; color: #d8d9e0; }
+  .grid {
+    display: grid; gap: 18px; padding: 18px 24px 48px; max-width: 1280px; margin: 0 auto;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  }
+  .card { background: #161824; border: 1px solid #23263a; border-radius: 12px; overflow: hidden; }
+  .card .top { display: flex; align-items: baseline; justify-content: space-between; padding: 10px 12px 6px; }
+  .card h2 { margin: 0; font-size: 15px; font-weight: 600; }
+  .card .note { padding: 0 12px 10px; color: #8f92a6; font-size: 12.5px; }
+  .card canvas { display: block; width: 100%; height: 190px; cursor: crosshair; touch-action: none; }
+  .star { background: none; border: 0; color: #4a4d63; font-size: 18px; cursor: pointer; line-height: 1; padding: 0 2px; }
+  .star.on { color: #ffcc4d; }
+  footer { text-align: center; color: #5f627a; padding: 0 24px 40px; font-size: 12.5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Little Guys Smorgasbord</h1>
+  <p>Each card is a tiny live flock. <b>Hover</b> — you're an obstacle. <b>Click &amp; hold</b> — you're a predator. Star the ones you like (saved locally).</p>
+</header>
+<div class="grid" id="grid"></div>
+<footer>Every creature is drawn with a few canvas strokes and faces its heading; wiggle rate is tied to speed.</footer>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+const rand = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const hsl = (h, s, l, a = 1) => `hsla(${h},${s}%,${l}%,${a})`;
+
+// ---------------------------------------------------------------------------
+// Mini flocking engine (one per card)
+// ---------------------------------------------------------------------------
+class Sim {
+  constructor(canvas, spec) {
+    this.canvas = canvas; this.spec = spec; this.ctx = canvas.getContext('2d');
+    this.mouse = { x: -1e9, y: -1e9, in: false, down: false };
+    this.t = 0; this.boids = [];
+    this.resize();
+    for (let i = 0; i < spec.count; i++) {
+      const a = rand(0, TAU), sp = rand(spec.minSpeed, spec.maxSpeed);
+      this.boids.push({
+        x: rand(0, this.w), y: rand(0, this.h),
+        vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+        angle: a, turn: 0, phase: rand(0, TAU), seed: Math.random(),
+        scale: rand(spec.scale[0], spec.scale[1]),
+        hue: (spec.hue ?? 200) + rand(-(spec.hueSpread ?? 15), spec.hueSpread ?? 15),
+        clock: Math.random(), scare: 0,
+      });
+    }
+    const pos = e => {
+      const r = canvas.getBoundingClientRect();
+      const p = e.touches ? e.touches[0] : e;
+      this.mouse.x = p.clientX - r.left; this.mouse.y = p.clientY - r.top;
+    };
+    canvas.addEventListener('mousemove', e => { pos(e); this.mouse.in = true; });
+    canvas.addEventListener('mouseenter', e => { pos(e); this.mouse.in = true; });
+    canvas.addEventListener('mouseleave', () => { this.mouse.in = false; this.mouse.down = false; });
+    canvas.addEventListener('mousedown', e => { pos(e); this.mouse.down = true; e.preventDefault(); });
+    window.addEventListener('mouseup', () => { this.mouse.down = false; });
+    canvas.addEventListener('touchstart', e => { pos(e); this.mouse.in = true; this.mouse.down = true; e.preventDefault(); }, { passive: false });
+    canvas.addEventListener('touchmove', e => { pos(e); e.preventDefault(); }, { passive: false });
+    canvas.addEventListener('touchend', () => { this.mouse.in = false; this.mouse.down = false; });
+  }
+  resize() {
+    const dpr = window.devicePixelRatio || 1;
+    const r = this.canvas.getBoundingClientRect();
+    this.w = r.width; this.h = r.height;
+    this.canvas.width = Math.round(r.width * dpr); this.canvas.height = Math.round(r.height * dpr);
+    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  step(dt) {
+    const s = this.spec, B = this.boids, w = this.w, h = this.h;
+    const predator = this.mouse.in && this.mouse.down;
+    const fearR = predator ? (s.fearRadius ?? 110) : (s.avoidRadius ?? 50);
+    const perc = s.perception ?? 45, perc2 = perc * perc;
+    const sepD = s.sepDist ?? 16, sep2 = sepD * sepD;
+    for (const b of B) {
+      let ax = 0, ay = 0, cx = 0, cy = 0, sx = 0, sy = 0, n = 0;
+      b.neighbors = [];
+      for (const o of B) {
+        if (o === b) continue;
+        let dx = o.x - b.x, dy = o.y - b.y;
+        if (dx > w / 2) dx -= w; else if (dx < -w / 2) dx += w;   // wrap-aware
+        if (dy > h / 2) dy -= h; else if (dy < -h / 2) dy += h;
+        const d2 = dx * dx + dy * dy;
+        if (d2 > perc2) continue;
+        n++; b.neighbors.push(o);
+        ax += o.vx; ay += o.vy; cx += dx; cy += dy;
+        if (d2 < sep2 && d2 > 0.01) { const d = Math.sqrt(d2); sx -= dx / d * (sepD - d) / sepD; sy -= dy / d * (sepD - d) / sepD; }
+      }
+      let fx = 0, fy = 0;
+      if (n) {
+        const sp = Math.hypot(b.vx, b.vy) || 1;
+        fx += ((ax / n) - b.vx) * (s.align ?? 0.06);
+        fy += ((ay / n) - b.vy) * (s.align ?? 0.06);
+        fx += (cx / n) * (s.cohere ?? 0.02) * sp / 40;
+        fy += (cy / n) * (s.cohere ?? 0.02) * sp / 40;
+      }
+      fx += sx * (s.separate ?? 3); fy += sy * (s.separate ?? 3);
+      // wander
+      b.phase2 = (b.phase2 ?? rand(0, TAU)) + dt * 1.7;
+      const wob = Math.sin(b.phase2 + b.seed * 9) * (s.wander ?? 0.4);
+      fx += -b.vy / 40 * wob; fy += b.vx / 40 * wob;
+      // cursor
+      b.scare = Math.max(0, b.scare - dt * 1.5);
+      if (this.mouse.in) {
+        const dx = b.x - this.mouse.x, dy = b.y - this.mouse.y, d = Math.hypot(dx, dy);
+        if (d < fearR && d > 0.01) {
+          const k = (1 - d / fearR);
+          const str = predator ? 18 * k * k : 6 * k * k;
+          fx += dx / d * str; fy += dy / d * str;
+          if (predator) b.scare = 1;
+        }
+      }
+      b.vx += fx * dt * 60 / 10; b.vy += fy * dt * 60 / 10;
+      const boost = 1 + b.scare * (s.panicBoost ?? 0.8);
+      const sp = Math.hypot(b.vx, b.vy) || 1e-6;
+      const target = clamp(sp, s.minSpeed, s.maxSpeed * boost);
+      b.vx *= target / sp; b.vy *= target / sp;
+    }
+    if (s.update) for (const b of B) s.update(b, b.neighbors, dt, this);
+    for (const b of B) {
+      b.x += b.vx * dt; b.y += b.vy * dt;
+      const m = 14;
+      if (b.x < -m) b.x += w + 2 * m; if (b.x > w + m) b.x -= w + 2 * m;
+      if (b.y < -m) b.y += h + 2 * m; if (b.y > h + m) b.y -= h + 2 * m;
+      const na = Math.atan2(b.vy, b.vx);
+      let da = na - b.angle; while (da > Math.PI) da -= TAU; while (da < -Math.PI) da += TAU;
+      b.turn = b.turn * 0.85 + da * 0.15; b.angle = na;
+      b.speed = Math.hypot(b.vx, b.vy);
+      b.clock += dt * (0.5 + b.speed / s.maxSpeed) * (s.animRate ?? 1);
+    }
+    this.t += dt;
+  }
+  draw() {
+    const c = this.ctx, s = this.spec;
+    c.setTransform(window.devicePixelRatio || 1, 0, 0, window.devicePixelRatio || 1, 0, 0);
+    if (typeof s.bg === 'function') s.bg(c, this.w, this.h, this.t); else { c.fillStyle = s.bg || '#0b1020'; c.fillRect(0, 0, this.w, this.h); }
+    const predator = this.mouse.in && this.mouse.down;
+    for (const b of this.boids) {
+      c.save(); c.translate(b.x, b.y);
+      if (!s.upright) c.rotate(b.angle + (s.sideways ? Math.PI / 2 : 0));
+      c.scale(b.scale, b.scale);
+      s.draw(c, b, this.t, this, predator);
+      c.restore();
+    }
+    if (this.mouse.in) {
+      c.save(); c.translate(this.mouse.x, this.mouse.y);
+      (s.drawCursor || drawRing)(c, predator, this.t);
+      c.restore();
+    }
+  }
+}
+function drawRing(c, predator, t) {
+  c.strokeStyle = predator ? 'rgba(255,90,90,.8)' : 'rgba(255,255,255,.35)';
+  c.lineWidth = 1.5; c.beginPath(); c.arc(0, 0, predator ? 12 + Math.sin(t * 12) * 2 : 8, 0, TAU); c.stroke();
+}
+function bigFish(c, predator) {
+  c.save(); c.scale(2.2, 2.2); c.globalAlpha = 0.85;
+  c.fillStyle = predator ? '#c8323c' : 'rgba(140,160,190,.5)';
+  c.beginPath(); c.moveTo(10, 0); c.quadraticCurveTo(2, -6, -7, 0); c.quadraticCurveTo(2, 6, 10, 0); c.fill();
+  c.beginPath(); c.moveTo(-6, 0); c.lineTo(-12, -5); c.lineTo(-12, 5); c.closePath(); c.fill();
+  if (predator) { c.fillStyle = '#fff'; c.beginPath(); c.arc(6, -1.5, 1.3, 0, TAU); c.fill(); c.fillStyle = '#000'; c.beginPath(); c.arc(6.3, -1.5, .6, 0, TAU); c.fill();
+    c.strokeStyle = '#fff'; c.lineWidth = .8; for (let i = 0; i < 4; i++) { c.beginPath(); c.moveTo(8 - i * 1.5, 1.2); c.lineTo(7.3 - i * 1.5, 3); c.stroke(); } }
+  c.restore();
+}
+function dog(c, predator, t) {
+  c.save(); c.scale(1.4, 1.4);
+  const bounce = predator ? Math.abs(Math.sin(t * 14)) * 2 : 0; c.translate(0, -bounce);
+  c.fillStyle = '#7a4a2a';
+  c.beginPath(); c.ellipse(0, 2, 8, 5, 0, 0, TAU); c.fill();            // body
+  c.beginPath(); c.arc(7, -2, 4.2, 0, TAU); c.fill();                    // head
+  c.beginPath(); c.ellipse(4.5, -5, 1.6, 3, -0.4, 0, TAU); c.fill();    // ear
+  c.strokeStyle = '#7a4a2a'; c.lineWidth = 2; c.lineCap = 'round';
+  c.beginPath(); c.moveTo(-8, 1); c.quadraticCurveTo(-13, -4 + Math.sin(t * 20) * 3, -12, -7); c.stroke(); // tail
+  for (const lx of [-4, 4]) { c.beginPath(); c.moveTo(lx, 6); c.lineTo(lx + (predator ? Math.sin(t * 20 + lx) * 2 : 0), 10); c.stroke(); }
+  c.fillStyle = '#111'; c.beginPath(); c.arc(10.5, -2.5, 1, 0, TAU); c.fill(); // nose
+  c.fillStyle = '#fff'; c.beginPath(); c.arc(7.5, -3.5, 1, 0, TAU); c.fill(); c.fillStyle = '#000'; c.beginPath(); c.arc(7.8, -3.5, .5, 0, TAU); c.fill();
+  if (predator) { c.fillStyle = '#fff'; c.font = 'bold 8px sans-serif'; c.fillText('WOOF', 9, -8); }
+  c.restore();
+}
+function hawk(c, predator, t) {
+  c.save(); c.scale(2.4, 2.4); c.fillStyle = predator ? '#2a1a12' : 'rgba(40,30,25,.55)';
+  const f = Math.sin(t * (predator ? 10 : 4)) * 2;
+  c.beginPath(); c.moveTo(0, 2); c.quadraticCurveTo(-6, -2 + f, -11, -1 + f * 1.5); c.quadraticCurveTo(-5, 1, 0, 3);
+  c.quadraticCurveTo(5, 1, 11, -1 + f * 1.5); c.quadraticCurveTo(6, -2 + f, 0, 2); c.fill();
+  c.beginPath(); c.moveTo(0, 0); c.lineTo(-2, 5); c.lineTo(2, 5); c.closePath(); c.fill();
+  c.restore();
+}
+// eye helper: look vector in local coords (already rotated frame or upright)
+function lookVec(b, sim, upright) {
+  const m = sim.mouse; let dx, dy;
+  if (m.in && Math.hypot(m.x - b.x, m.y - b.y) < 90) { dx = m.x - b.x; dy = m.y - b.y; }
+  else { dx = b.vx; dy = b.vy; }
+  if (!upright) { const ca = Math.cos(-b.angle), sa = Math.sin(-b.angle); [dx, dy] = [dx * ca - dy * sa, dx * sa + dy * ca]; }
+  const d = Math.hypot(dx, dy) || 1; return [dx / d, dy / d];
+}
+function glow(c, x, y, r, color) {
+  const g = c.createRadialGradient(x, y, 0, x, y, r);
+  g.addColorStop(0, color); g.addColorStop(1, 'rgba(0,0,0,0)');
+  c.fillStyle = g; c.beginPath(); c.arc(x, y, r, 0, TAU); c.fill();
+}
+const water = (hueA, hueB) => (c, w, h) => { const g = c.createLinearGradient(0, 0, 0, h); g.addColorStop(0, hueA); g.addColorStop(1, hueB); c.fillStyle = g; c.fillRect(0, 0, w, h); };
+
+// ---------------------------------------------------------------------------
+// The little guys
+// ---------------------------------------------------------------------------
+const CREATURES = [
+  {
+    name: 'Fish', note: 'Tail wags with speed, body banks into turns. Cursor is a bigger fish.',
+    count: 14, minSpeed: 30, maxSpeed: 70, scale: [0.8, 1.2], hue: 30, hueSpread: 40,
+    bg: water('#0a2a44', '#061626'), drawCursor: bigFish,
+    draw(c, b) {
+      const wag = Math.sin(b.clock * 14 + b.phase) * 0.45;
+      c.scale(1, 1 - Math.min(0.5, Math.abs(b.turn) * 3));
+      c.fillStyle = hsl(b.hue, 75, 62);
+      c.beginPath(); c.moveTo(8, 0); c.quadraticCurveTo(2, -4.2, -5, 0); c.quadraticCurveTo(2, 4.2, 8, 0); c.fill();
+      c.save(); c.translate(-4.5, 0); c.rotate(wag);
+      c.beginPath(); c.moveTo(0, 0); c.lineTo(-5, -4); c.lineTo(-4, 0); c.lineTo(-5, 4); c.closePath(); c.fill(); c.restore();
+      c.fillStyle = hsl(b.hue, 60, 40, .7); c.beginPath(); c.moveTo(1, -1); c.quadraticCurveTo(-1, -5, -3, -1); c.fill(); // dorsal
+      c.fillStyle = '#fff'; c.beginPath(); c.arc(5, -1, 1.1, 0, TAU); c.fill();
+      c.fillStyle = '#111'; c.beginPath(); c.arc(5.3, -1, .55, 0, TAU); c.fill();
+    },
+  },
+  {
+    name: 'Shrimp', note: 'Curled segmented body, flicking swimmerets, long antennae. Translucent.',
+    count: 14, minSpeed: 25, maxSpeed: 65, scale: [0.8, 1.15], hue: 12, hueSpread: 10,
+    bg: water('#0d2036', '#08131f'), drawCursor: bigFish, panicBoost: 1.4,
+    draw(c, b) {
+      const k = b.clock * 16 + b.phase;
+      c.strokeStyle = hsl(b.hue, 70, 78, .9); c.lineWidth = 0.8; c.lineCap = 'round';
+      c.beginPath(); c.moveTo(6, -1); c.quadraticCurveTo(13, -7, -2, -8); c.stroke();
+      c.beginPath(); c.moveTo(6, 0); c.quadraticCurveTo(14, -4, 2, -6.5); c.stroke();
+      for (let i = 0; i < 7; i++) {                           // body segments along a curl
+        const x = 6 - i * 2.1, y = i * i * 0.16, r = 2.5 - i * 0.22;
+        c.fillStyle = hsl(b.hue, 80, 72 - i * 2, .75); c.beginPath(); c.arc(x, y, r, 0, TAU); c.fill();
+        if (i > 0 && i < 6) { c.strokeStyle = hsl(b.hue, 70, 60, .8); c.beginPath(); const l = Math.sin(k + i) * 1.2; c.moveTo(x, y + r * .6); c.lineTo(x - 1 + l, y + r + 2.2); c.stroke(); }
+      }
+      c.fillStyle = hsl(b.hue, 80, 70, .7);                    // tail fan
+      c.beginPath(); c.moveTo(-6.6, 5.8); c.lineTo(-10, 4.5); c.lineTo(-9.5, 8.5); c.closePath(); c.fill();
+      c.beginPath(); c.moveTo(-6.6, 5.8); c.lineTo(-8, 9.5); c.lineTo(-5, 8.8); c.closePath(); c.fill();
+      c.fillStyle = '#111'; c.beginPath(); c.arc(6.5, -1.6, .7, 0, TAU); c.fill();
+    },
+  },
+  {
+    name: 'Birds', note: 'Murmuration-style V silhouettes that flap. Cursor is a hawk.',
+    count: 26, minSpeed: 45, maxSpeed: 95, scale: [0.8, 1.1], hue: 220, hueSpread: 0,
+    perception: 55, align: 0.09, cohere: 0.03, sepDist: 14, drawCursor: hawk, panicBoost: 1.0,
+    bg: (c, w, h) => { const g = c.createLinearGradient(0, 0, 0, h); g.addColorStop(0, '#e7a56b'); g.addColorStop(.55, '#d97f7a'); g.addColorStop(1, '#5a4a7a'); c.fillStyle = g; c.fillRect(0, 0, w, h);
+      c.fillStyle = 'rgba(255,240,200,.9)'; c.beginPath(); c.arc(w * .78, h * .72, 16, 0, TAU); c.fill(); },
+    draw(c, b) {
+      const f = Math.sin(b.clock * 16 + b.phase);          // -1..1
+      const wy = 3 + 4 * (0.5 + 0.5 * f), tip = -1 - 2 * f;
+      c.strokeStyle = '#1e1a2a'; c.lineWidth = 1.6; c.lineCap = 'round';
+      c.beginPath(); c.moveTo(1, 0); c.quadraticCurveTo(-2, -wy * .45, tip - 4, -wy); c.stroke();
+      c.beginPath(); c.moveTo(1, 0); c.quadraticCurveTo(-2, wy * .45, tip - 4, wy); c.stroke();
+      c.fillStyle = '#1e1a2a'; c.beginPath(); c.ellipse(0, 0, 2.6, 1.1, 0, 0, TAU); c.fill();
+    },
+  },
+  {
+    name: 'Glow worms', note: 'Wiggly segmented bodies with a luminous tail. Slow, sinuous, eerie.',
+    count: 12, minSpeed: 18, maxSpeed: 45, scale: [0.9, 1.3], hue: 130, hueSpread: 25, animRate: 1.2,
+    bg: '#050a08', separate: 2, cohere: 0.03,
+    draw(c, b, t) {
+      const k = b.clock * 9 + b.phase, amp = 1.2 + b.speed / 40;
+      const pts = [];
+      for (let i = 0; i <= 9; i++) pts.push([-i * 1.9, Math.sin(i * 0.75 - k) * amp * Math.min(1, i / 3)]);
+      const pulse = 0.6 + 0.4 * Math.sin(t * 2.5 + b.phase);
+      const tail = pts[9]; glow(c, tail[0], tail[1], 9 + pulse * 3, hsl(b.hue, 100, 70, .55 * pulse));
+      glow(c, pts[7][0], pts[7][1], 6, hsl(b.hue, 100, 70, .35 * pulse));
+      for (let i = 9; i >= 0; i--) {
+        const litness = i >= 6 ? 1 : 0; const r = 1.8 - i * 0.08;
+        c.fillStyle = litness ? hsl(b.hue, 100, 70 + pulse * 20) : hsl(b.hue, 30, 30 + i * 2);
+        c.beginPath(); c.arc(pts[i][0], pts[i][1], r, 0, TAU); c.fill();
+      }
+      c.fillStyle = '#e8ffe8'; c.beginPath(); c.arc(0.8, -.8, .45, 0, TAU); c.arc(0.8, .8, .45, 0, TAU); c.fill();
+    },
+  },
+  {
+    name: 'Amoebas', note: 'Blobby membranes that ripple and stretch along their heading. Nucleus + vacuoles.',
+    count: 10, minSpeed: 12, maxSpeed: 32, scale: [0.9, 1.5], hue: 150, hueSpread: 60, animRate: 0.8,
+    bg: '#0a0e12', sepDist: 24, perception: 60, cohere: 0.015, panicBoost: 1.2,
+    draw(c, b, t) {
+      const N = 28, stretch = 1 + Math.min(0.5, b.speed / 60);
+      c.beginPath();
+      for (let i = 0; i <= N; i++) {
+        const th = i / N * TAU;
+        const r = 7 * (1 + 0.22 * Math.sin(3 * th + t * 1.6 + b.phase) + 0.14 * Math.sin(5 * th - t * 2.3 + b.phase * 2) + 0.08 * Math.sin(8 * th + t * 3.1));
+        const x = Math.cos(th) * r * stretch, y = Math.sin(th) * r / Math.sqrt(stretch);
+        i ? c.lineTo(x, y) : c.moveTo(x, y);
+      }
+      c.closePath(); c.fillStyle = hsl(b.hue, 60, 60, .35); c.fill();
+      c.strokeStyle = hsl(b.hue, 70, 75, .8); c.lineWidth = 1; c.stroke();
+      c.fillStyle = hsl(b.hue, 50, 35, .9); c.beginPath(); c.arc(1 + Math.sin(t + b.phase), 0, 2.3, 0, TAU); c.fill();
+      c.fillStyle = hsl(b.hue, 60, 85, .5);
+      c.beginPath(); c.arc(-3, 2.5 + Math.sin(t * 1.3 + b.phase) * .8, 1.2, 0, TAU); c.fill();
+      c.beginPath(); c.arc(-2 + Math.cos(t * .9 + b.phase), -3, .9, 0, TAU); c.fill();
+    },
+  },
+  {
+    name: 'Simplicial complexes', note: 'A filled 2-simplex with free 1-simplex arms that wiggle. Some have a glued second triangle or a dangling vertex.',
+    count: 12, minSpeed: 22, maxSpeed: 55, scale: [0.85, 1.2], hue: 290, hueSpread: 60, animRate: 1.3,
+    bg: '#0c0a14', sepDist: 22, panicBoost: 1.0,
+    draw(c, b) {
+      const k = b.clock * 5 + b.phase, col = hsl(b.hue, 80, 72);
+      const A = [5, 0], B = [-3, -4], C = [-3, 4];
+      const tri = (p, q, r) => { c.beginPath(); c.moveTo(...p); c.lineTo(...q); c.lineTo(...r); c.closePath(); c.fillStyle = hsl(b.hue, 70, 60, .35); c.fill(); c.strokeStyle = col; c.lineWidth = 1; c.stroke(); };
+      tri(A, B, C);
+      const verts = [A, B, C];
+      if (b.seed > 0.65) { const D = [-9 + Math.sin(k) * 0.6, Math.sin(k * 1.3) * 1.2]; tri(B, C, D); verts.push(D); }  // glued 2nd triangle
+      // free arms: wiggling edges
+      const arm = (from, baseAng, len, ph) => {
+        const a = baseAng + Math.sin(k * 1.6 + ph) * 0.55;
+        const p = [from[0] + Math.cos(a) * len, from[1] + Math.sin(a) * len];
+        c.strokeStyle = col; c.lineWidth = 1; c.beginPath(); c.moveTo(...from); c.lineTo(...p); c.stroke(); verts.push(p); return p;
+      };
+      const p1 = arm(A, -0.5, 6, 0);
+      if (b.seed > 0.3) arm(p1, -0.3, 4.5, 2);                       // 2-edge chain
+      if (b.seed < 0.5 || b.seed > 0.8) arm(C, 2.3, 5, 4);
+      if (b.seed > 0.45 && b.seed < 0.65) arm(B, -2.4, 5.5, 1);
+      // occasional lonely 0-simplex drifting nearby
+      if (b.seed < 0.25) { const q = [-8 + Math.cos(k) * 1.5, -7 + Math.sin(k * 0.7) * 1.5]; verts.push(q); }
+      c.fillStyle = '#fff';
+      for (const v of verts) { c.beginPath(); c.arc(v[0], v[1], 1.25, 0, TAU); c.fill(); }
+    },
+  },
+  {
+    name: 'Fireflies', note: 'Blinking on their own rhythm — and nudging toward neighbours\' rhythm, so they sync up (Kuramoto). Scared = go dark.',
+    count: 22, minSpeed: 10, maxSpeed: 35, scale: [0.9, 1.2], hue: 70, hueSpread: 12,
+    bg: (c, w, h) => { const g = c.createLinearGradient(0, 0, 0, h); g.addColorStop(0, '#05070f'); g.addColorStop(1, '#0d1a12'); c.fillStyle = g; c.fillRect(0, 0, w, h); },
+    perception: 70, cohere: 0.01, align: 0.02, wander: 0.9, panicBoost: 1.5,
+    update(b, nbrs, dt) {
+      b.rate = b.rate ?? rand(0.42, 0.5);
+      let dph = b.rate;
+      for (const o of nbrs) dph += 0.18 * Math.sin(TAU * ((o.phi ?? 0) - (b.phi ?? 0)));
+      b.phi = ((b.phi ?? b.seed) + dph * dt) % 1;
+    },
+    draw(c, b, t, sim, predator) {
+      const p = b.phi ?? 0, on = Math.pow(Math.max(0, Math.cos(TAU * p)), 6) * (1 - b.scare);
+      c.fillStyle = '#2a2a1c'; c.beginPath(); c.ellipse(1, 0, 3.2, 1.6, 0, 0, TAU); c.fill();
+      c.strokeStyle = 'rgba(200,200,220,.35)'; c.lineWidth = .8;
+      const f = Math.sin(b.clock * 40) * 1.2;
+      c.beginPath(); c.ellipse(0, -1.5 - f, 3, 1.1, -0.3, 0, TAU); c.stroke();
+      c.beginPath(); c.ellipse(0, 1.5 + f, 3, 1.1, 0.3, 0, TAU); c.stroke();
+      if (on > 0.02) { glow(c, -2.5, 0, 12 * on + 4, hsl(b.hue, 100, 70, .7 * on)); }
+      c.fillStyle = hsl(b.hue, 100, 55 + 40 * on); c.beginPath(); c.ellipse(-2.5, 0, 2, 1.4, 0, 0, TAU); c.fill();
+    },
+  },
+  {
+    name: 'Tadpoles', note: 'Round heads and whipping tails. Goofy, fast, easy to draw.',
+    count: 16, minSpeed: 30, maxSpeed: 80, scale: [0.8, 1.2], hue: 95, hueSpread: 30, animRate: 1.4,
+    bg: water('#1a2e14', '#0c1a0c'), drawCursor: bigFish,
+    draw(c, b) {
+      const k = b.clock * 12 + b.phase;
+      c.strokeStyle = hsl(b.hue, 40, 30); c.lineWidth = 1.6; c.lineCap = 'round';
+      c.beginPath(); c.moveTo(-1, 0);
+      for (let i = 1; i <= 7; i++) c.lineTo(-1 - i * 1.6, Math.sin(i * 0.9 - k) * 2.2 * (i / 7));
+      c.stroke();
+      c.fillStyle = hsl(b.hue, 40, 30); c.beginPath(); c.ellipse(1.5, 0, 4.2, 3.2, 0, 0, TAU); c.fill();
+      c.fillStyle = hsl(b.hue, 60, 55); c.beginPath(); c.ellipse(2, -.5, 2.6, 1.7, 0, 0, TAU); c.fill();
+      c.fillStyle = '#fff'; c.beginPath(); c.arc(4, -1.4, .9, 0, TAU); c.arc(4, 1.4, .9, 0, TAU); c.fill();
+      c.fillStyle = '#000'; c.beginPath(); c.arc(4.3, -1.4, .45, 0, TAU); c.arc(4.3, 1.4, .45, 0, TAU); c.fill();
+    },
+  },
+  {
+    name: 'Ghosts', note: 'Stay upright while drifting. Eyes look where they\'re going — or at you, if you get close.',
+    count: 12, minSpeed: 15, maxSpeed: 45, scale: [0.9, 1.2], hue: 200, hueSpread: 120, upright: true,
+    bg: '#0a0812', sepDist: 20, panicBoost: 1.2,
+    draw(c, b, t, sim, predator) {
+      const [lx, ly] = lookVec(b, sim, true), scared = b.scare > 0.3;
+      c.fillStyle = hsl(b.hue, 45, 85, .92);
+      c.beginPath(); c.arc(0, -2, 6, Math.PI, 0);
+      c.lineTo(6, 4);
+      for (let i = 0; i < 3; i++) { const x = 6 - (i + 0.5) * 4; c.quadraticCurveTo(x, 6 + Math.sin(t * 6 + b.phase + i) * 1.5, x - 2, 4); }
+      c.closePath(); c.fill();
+      const ex = lx * 1.2, ey = ly * 1.2, er = scared ? 2.2 : 1.7;
+      c.fillStyle = '#fff'; c.beginPath(); c.arc(-2.3, -2.5, er, 0, TAU); c.arc(2.3, -2.5, er, 0, TAU); c.fill();
+      c.fillStyle = '#1a1a2a'; c.beginPath(); c.arc(-2.3 + ex, -2.5 + ey, scared ? .6 : 1, 0, TAU); c.arc(2.3 + ex, -2.5 + ey, scared ? .6 : 1, 0, TAU); c.fill();
+      if (scared) { c.strokeStyle = '#1a1a2a'; c.lineWidth = .8; c.beginPath(); c.arc(0, 1.2, 1.4, 0, TAU); c.stroke(); }
+    },
+  },
+  {
+    name: 'Sheep', note: 'Fluffy, dumb, bunch up in herds. Cursor is a sheepdog. This is the herding game.',
+    count: 12, minSpeed: 6, maxSpeed: 30, scale: [0.9, 1.15], hue: 40, hueSpread: 5, upright: true,
+    bg: (c, w, h) => { c.fillStyle = '#4c7a3a'; c.fillRect(0, 0, w, h); c.fillStyle = 'rgba(255,255,255,.05)'; for (let i = 0; i < 30; i++) c.fillRect((i * 53) % w, (i * 97) % h, 2, 2); },
+    sepDist: 15, perception: 50, cohere: 0.05, align: 0.05, wander: 0.5, panicBoost: 2, fearRadius: 90,
+    drawCursor: dog,
+    draw(c, b, t, sim, predator) {
+      const dir = b.vx >= 0 ? 1 : -1, walk = Math.sin(b.clock * 14) * (b.speed / 25);
+      c.strokeStyle = '#222'; c.lineWidth = 1.4; c.lineCap = 'round';
+      for (const [lx, ph] of [[-3, 0], [-1, Math.PI], [1.5, 0], [3.5, Math.PI]]) { c.beginPath(); c.moveTo(lx, 3); c.lineTo(lx + Math.sin(b.clock * 14 + ph) * walk * 1.5, 6.5); c.stroke(); }
+      c.fillStyle = '#f4efe2';
+      for (const [x, y, r] of [[-4, 0, 3.6], [0, -1.5, 4.2], [3.5, 0, 3.6], [-1.5, 2, 3.4], [2, 2, 3.4]]) { c.beginPath(); c.arc(x, y, r, 0, TAU); c.fill(); }
+      c.fillStyle = '#222'; c.beginPath(); c.ellipse(dir * 6, -1.5, 3, 2.3, 0, 0, TAU); c.fill();
+      c.beginPath(); c.ellipse(dir * 4.5, -3.5, 1.6, .8, dir * -0.6, 0, TAU); c.fill();
+      c.fillStyle = '#fff'; c.beginPath(); c.arc(dir * 7, -2.2, .8, 0, TAU); c.fill();
+      c.fillStyle = '#000'; c.beginPath(); c.arc(dir * 7.2, -2.2, .4, 0, TAU); c.fill();
+      if (b.scare > 0.5 && Math.sin(t * 5 + b.phase) > 0.7) { c.fillStyle = '#fff'; c.font = 'bold 6px sans-serif'; c.fillText('baa', dir * 5, -7); }
+    },
+  },
+  {
+    name: 'Paper planes', note: 'Crisp darts that roll into turns. Light and gliding.',
+    count: 14, minSpeed: 35, maxSpeed: 75, scale: [0.9, 1.2], hue: 210, hueSpread: 30,
+    bg: (c, w, h) => { const g = c.createLinearGradient(0, 0, 0, h); g.addColorStop(0, '#7fb3e6'); g.addColorStop(1, '#d6ecfb'); c.fillStyle = g; c.fillRect(0, 0, w, h); },
+    align: 0.08, wander: 0.3,
+    draw(c, b) {
+      c.scale(1, Math.max(0.35, 1 - Math.abs(b.turn) * 5));
+      c.fillStyle = '#fbfcff'; c.strokeStyle = '#7a8aa0'; c.lineWidth = .7; c.lineJoin = 'round';
+      c.beginPath(); c.moveTo(9, 0); c.lineTo(-6, -5.5); c.lineTo(-3, 0); c.lineTo(-6, 5.5); c.closePath(); c.fill(); c.stroke();
+      c.fillStyle = hsl(b.hue, 30, 80); c.beginPath(); c.moveTo(9, 0); c.lineTo(-6, 5.5); c.lineTo(-3, 0); c.closePath(); c.fill();
+      c.beginPath(); c.moveTo(9, 0); c.lineTo(-3, 0); c.stroke();
+    },
+  },
+  {
+    name: 'Jellyfish', note: 'Pulsing bells with trailing tentacles. Slow and dreamy; flee = frantic pulsing.',
+    count: 9, minSpeed: 8, maxSpeed: 28, scale: [0.9, 1.4], hue: 300, hueSpread: 60, animRate: 0.9,
+    bg: water('#12063a', '#050214'), sepDist: 26, perception: 60, panicBoost: 1.6,
+    draw(c, b, t) {
+      const pulse = 1 + 0.18 * Math.sin(b.clock * 6 + b.phase);
+      c.strokeStyle = hsl(b.hue, 80, 80, .55); c.lineWidth = .8; c.lineCap = 'round';
+      for (let i = -2; i <= 2; i++) {
+        c.beginPath(); c.moveTo(-2, i * 1.8);
+        for (let j = 1; j <= 6; j++) c.lineTo(-2 - j * 2.2, i * 1.8 * (1 + j * .12) + Math.sin(j * .8 - b.clock * 5 + i) * 1.2);
+        c.stroke();
+      }
+      glow(c, 0, 0, 12, hsl(b.hue, 90, 75, .25));
+      c.save(); c.scale(1 / pulse, pulse);
+      c.fillStyle = hsl(b.hue, 80, 75, .55); c.beginPath(); c.arc(0, 0, 6.5, -Math.PI / 2, Math.PI / 2); c.quadraticCurveTo(-1.5, 0, 0, -6.5); c.fill();
+      c.strokeStyle = hsl(b.hue, 90, 90, .8); c.lineWidth = 1; c.stroke();
+      c.fillStyle = hsl(b.hue, 90, 90, .5); c.beginPath(); c.arc(2, 0, 2, 0, TAU); c.fill();
+      c.restore();
+    },
+  },
+  {
+    name: 'Eyeballs', note: 'Just... eyes. They flock. Pupils track your cursor. Unsettling in a fun way.',
+    count: 14, minSpeed: 10, maxSpeed: 40, scale: [0.9, 1.3], hue: 200, hueSpread: 160, upright: true,
+    bg: '#120a0a', sepDist: 18, panicBoost: 1.3,
+    draw(c, b, t, sim) {
+      const [lx, ly] = lookVec(b, sim, true), scared = b.scare > 0.3;
+      const blink = (Math.sin(t * 1.3 + b.phase * 7) > 0.985) ? 0.15 : 1;
+      c.save(); c.scale(1, blink);
+      c.fillStyle = '#f5f3ee'; c.beginPath(); c.arc(0, 0, 6, 0, TAU); c.fill();
+      c.strokeStyle = 'rgba(200,60,60,.35)'; c.lineWidth = .5; for (let i = 0; i < 4; i++) { const a = b.seed * 9 + i * 1.7; c.beginPath(); c.moveTo(Math.cos(a) * 5.8, Math.sin(a) * 5.8); c.quadraticCurveTo(Math.cos(a + .3) * 4, Math.sin(a + .3) * 4, Math.cos(a + .1) * 3.2, Math.sin(a + .1) * 3.2); c.stroke(); }
+      const px = lx * 2.4, py = ly * 2.4;
+      c.fillStyle = hsl(b.hue, 60, 45); c.beginPath(); c.arc(px, py, 3, 0, TAU); c.fill();
+      c.fillStyle = '#000'; c.beginPath(); c.arc(px, py, scared ? 2.3 : 1.4, 0, TAU); c.fill();
+      c.fillStyle = 'rgba(255,255,255,.9)'; c.beginPath(); c.arc(px - 1, py - 1.2, .7, 0, TAU); c.fill();
+      c.restore();
+    },
+  },
+  {
+    name: 'Ants', note: 'Three segments, six alternating legs, antennae. Scurry in lines; scatter when poked.',
+    count: 18, minSpeed: 30, maxSpeed: 70, scale: [0.85, 1.1], hue: 15, hueSpread: 8, animRate: 1.8,
+    bg: '#c9b48a', align: 0.1, cohere: 0.03, sepDist: 12, panicBoost: 1.0,
+    draw(c, b) {
+      const k = b.clock * 18 + b.phase, col = hsl(b.hue, 40, 22);
+      c.strokeStyle = col; c.lineWidth = .8; c.lineCap = 'round';
+      for (let i = 0; i < 3; i++) {
+        const x = 2 - i * 1.6, sw = Math.sin(k + i * Math.PI) * 1.4;
+        for (const s of [-1, 1]) { c.beginPath(); c.moveTo(x, s * 1); c.lineTo(x + sw * s * s, s * 3.5); c.lineTo(x + sw - 1, s * 5.2); c.stroke(); }
+      }
+      c.beginPath(); c.moveTo(4.5, -1); c.quadraticCurveTo(7, -3, 8, -4); c.moveTo(4.5, 1); c.quadraticCurveTo(7, 3, 8, 4); c.stroke();
+      c.fillStyle = col;
+      c.beginPath(); c.ellipse(-4, 0, 3.2, 2.1, 0, 0, TAU); c.fill();
+      c.beginPath(); c.ellipse(0.5, 0, 1.9, 1.4, 0, 0, TAU); c.fill();
+      c.beginPath(); c.ellipse(4, 0, 1.9, 1.7, 0, 0, TAU); c.fill();
+    },
+  },
+  {
+    name: 'Ladybugs', note: 'Round, spotted, very obviously individual. Weak flocking, strong scattering.',
+    count: 12, minSpeed: 12, maxSpeed: 45, scale: [0.9, 1.2], hue: 0, hueSpread: 20,
+    bg: '#2f5a2a', cohere: 0.01, align: 0.03, sepDist: 18, panicBoost: 1.4,
+    draw(c, b) {
+      c.strokeStyle = '#111'; c.lineWidth = .8;
+      for (let i = 0; i < 3; i++) for (const s of [-1, 1]) { const w = Math.sin(b.clock * 16 + i * 2) * .8 * (b.speed / 30); c.beginPath(); c.moveTo(2 - i * 2, s * 3); c.lineTo(2 - i * 2 + w, s * 5.5); c.stroke(); }
+      c.fillStyle = hsl(b.hue, 85, 50); c.beginPath(); c.ellipse(-0.5, 0, 5.2, 4.4, 0, 0, TAU); c.fill();
+      c.fillStyle = '#111'; c.beginPath(); c.arc(4.5, 0, 2, 0, TAU); c.fill();
+      c.beginPath(); c.moveTo(2.5, -3.8); c.lineTo(-5.5, 0); c.lineTo(2.5, 3.8); c.closePath(); c.fillStyle = hsl(b.hue, 85, 50); c.fill();
+      c.strokeStyle = '#111'; c.lineWidth = .8; c.beginPath(); c.moveTo(3.5, 0); c.lineTo(-5.6, 0); c.stroke();
+      c.fillStyle = '#111';
+      const spots = b.seed > 0.5 ? [[0, -2.2], [-3, -1.5], [0, 2.2], [-3, 1.5], [1.8, 0]] : [[-1, -2], [-1, 2], [-3.5, 0]];
+      for (const [x, y] of spots) { c.beginPath(); c.arc(x, y, .9, 0, TAU); c.fill(); }
+      c.fillStyle = '#fff'; c.beginPath(); c.arc(5.2, -1, .5, 0, TAU); c.arc(5.2, 1, .5, 0, TAU); c.fill();
+    },
+  },
+  {
+    name: 'Crabs', note: 'Scuttle sideways relative to where they face. Claws up. Legs go frantic when scared.',
+    count: 11, minSpeed: 15, maxSpeed: 55, scale: [0.9, 1.2], hue: 20, hueSpread: 15, sideways: true, animRate: 1.5,
+    bg: (c, w, h) => { const g = c.createLinearGradient(0, 0, 0, h); g.addColorStop(0, '#2e6f8a'); g.addColorStop(.5, '#e7d3a5'); g.addColorStop(1, '#d6bf8c'); c.fillStyle = g; c.fillRect(0, 0, w, h); },
+    sepDist: 20, cohere: 0.015, panicBoost: 1.3,
+    draw(c, b) {
+      const k = b.clock * 20 + b.phase, col = hsl(b.hue, 80, 50);
+      c.strokeStyle = col; c.lineWidth = 1.2; c.lineCap = 'round';
+      for (let i = 0; i < 4; i++) for (const s of [-1, 1]) {
+        const y = -2 + i * 1.6, sw = Math.sin(k + i * 1.5 + (s > 0 ? Math.PI : 0)) * 1.5;
+        c.beginPath(); c.moveTo(s * 4.5, y); c.lineTo(s * 7.5, y - 1.5 + sw); c.lineTo(s * 9, y + 2 + sw); c.stroke();
+      }
+      c.fillStyle = col; c.beginPath(); c.ellipse(0, 0, 5.5, 4, 0, 0, TAU); c.fill();
+      for (const s of [-1, 1]) {                     // claws (toward -y = "face")
+        c.beginPath(); c.moveTo(s * 3, -3); c.lineTo(s * 5.5, -6.5); c.stroke();
+        const pinch = Math.sin(k * .5 + s) * .4;
+        c.beginPath(); c.ellipse(s * 6, -7.5, 2, 1.4, s * (0.6 + pinch), 0, TAU); c.fill();
+      }
+      c.strokeStyle = col; c.lineWidth = .8;
+      c.beginPath(); c.moveTo(-1.5, -3.5); c.lineTo(-1.5, -5.5); c.moveTo(1.5, -3.5); c.lineTo(1.5, -5.5); c.stroke();
+      c.fillStyle = '#111'; c.beginPath(); c.arc(-1.5, -6, .9, 0, TAU); c.arc(1.5, -6, .9, 0, TAU); c.fill();
+    },
+  },
+  {
+    name: 'Moths', note: 'Top-down wings that flutter, dusty pastel patterns. Would love a lamp to circle.',
+    count: 13, minSpeed: 20, maxSpeed: 60, scale: [0.9, 1.25], hue: 35, hueSpread: 40, animRate: 1.6,
+    bg: '#14101c', wander: 0.8, cohere: 0.015, sepDist: 18,
+    draw(c, b) {
+      const f = 0.35 + 0.65 * Math.abs(Math.sin(b.clock * 14 + b.phase));
+      c.strokeStyle = hsl(b.hue, 30, 70); c.lineWidth = .6;
+      c.beginPath(); c.moveTo(4, -.5); c.quadraticCurveTo(7, -3, 8, -4.5); c.moveTo(4, .5); c.quadraticCurveTo(7, 3, 8, 4.5); c.stroke();
+      for (const s of [-1, 1]) {
+        c.save(); c.scale(1, f);
+        c.fillStyle = hsl(b.hue, 50, 70, .9); c.beginPath(); c.ellipse(-2, s * 3.2, 2.6, 3.4, s * .3, 0, TAU); c.fill();
+        c.fillStyle = hsl(b.hue, 55, 78, .95); c.beginPath(); c.ellipse(1, s * 4.2, 3.6, 4.4, s * -.2, 0, TAU); c.fill();
+        c.fillStyle = hsl(b.hue + 40, 60, 45, .8); c.beginPath(); c.arc(1.5, s * 4.5, 1.1, 0, TAU); c.fill();
+        c.restore();
+      }
+      c.fillStyle = hsl(b.hue, 30, 35); c.beginPath(); c.ellipse(0, 0, 4, 1.4, 0, 0, TAU); c.fill();
+    },
+  },
+];
+
+// ---------------------------------------------------------------------------
+// Build the page
+// ---------------------------------------------------------------------------
+const grid = document.getElementById('grid');
+let stars = {}; try { stars = JSON.parse(localStorage.getItem('smorgasbord-stars') || '{}'); } catch (e) {}
+const sims = [];
+for (const spec of CREATURES) {
+  const card = document.createElement('div'); card.className = 'card';
+  card.innerHTML = `<div class="top"><h2></h2><button class="star" title="star this one">★</button></div><canvas></canvas><div class="note"></div>`;
+  card.querySelector('h2').textContent = spec.name; card.querySelector('.note').textContent = spec.note;
+  const star = card.querySelector('.star'); if (stars[spec.name]) star.classList.add('on');
+  star.addEventListener('click', () => { stars[spec.name] = !stars[spec.name]; star.classList.toggle('on', !!stars[spec.name]); try { localStorage.setItem('smorgasbord-stars', JSON.stringify(stars)); } catch (e) {} });
+  grid.appendChild(card);
+  sims.push(new Sim(card.querySelector('canvas'), spec));
+}
+window.addEventListener('resize', () => sims.forEach(s => s.resize()));
+
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  for (const s of sims) { s.step(dt); s.draw(); }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
