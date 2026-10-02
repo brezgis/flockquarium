@@ -28,8 +28,8 @@ python3 -m http.server 8000
 | File | What |
 |---|---|
 | `flockquarium.html` | The lamp. `index.html` and `lamp.html` just redirect to it. |
-| `panorama-1..3.png` | Back drum layer: three 1536×1024 reef panels, stitched into a ring with cross-faded seams. |
-| `foreground-1..3.png` | Front drum layer: transparent kelp/coral panels that roll 1.6× faster for parallax. |
+| `panorama-1..3.jpg` | Back drum layer: three 1536×1024 reef panels, stitched into a ring with cross-faded seams. |
+| `foreground-1..3.webp` | Front drum layer: transparent kelp/coral panels that roll 1.6× faster for parallax. |
 | `smorgasbord.html` | The creature tryouts that came before the fish — 17 kinds of little guys, each a live mini-flock. |
 | `pixelfish.html` | A pixel-art fish sprite sheet, in case the lamp ever goes 8-bit. |
 | `screenshots/` | These pictures. |

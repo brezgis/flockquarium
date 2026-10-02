@@ -181,29 +181,24 @@ function sToC(su) { const f = clamp(su / SFRONT, 0, 1) * M; const i = Math.min(M
 // Background texture: user panorama(s) if present, else a procedural reef.
 // ---------------------------------------------------------------------------
 const TH = 1024;
-// Layers: back = opaque reef panorama (panorama*.jpg), front = transparent kelp/coral (foreground*.png), rolling faster.
+// Layers: back = opaque reef panorama (panorama-*.jpg), front = transparent kelp/coral (foreground-*.webp), rolling faster.
+const PANORAMA = ['panorama-1.jpg', 'panorama-2.jpg', 'panorama-3.jpg'];
+const FOREGROUND = ['foreground-1.webp', 'foreground-2.webp', 'foreground-3.webp'];
 const layers = [];   // { tex2, TW, speed }
+let drumShown = 0;   // when the reef arrived (ms); it fades in over the plain water the fish start in
 function loadImage(src) { return new Promise(res => { const im = new Image(); im.onload = () => res(im); im.onerror = () => res(null); im.src = src; }); }
-async function findImages(prefix) {
-  const found = [];
-  for (const base of [prefix + '-1', prefix + '-2', prefix + '-3', prefix + '-4']) {
-    let im = null; for (const ext of ['jpg', 'png', 'webp']) { im = await loadImage(`${base}.${ext}`); if (im) break; }
-    if (im) found.push(im);
-  }
-  if (!found.length) for (const ext of ['jpg', 'png', 'webp']) { const im = await loadImage(`${prefix}.${ext}`); if (im) { found.push(im); break; } }
-  return found;
-}
+const loadAll = srcs => Promise.all(srcs.map(loadImage)).then(ims => ims.filter(Boolean));
 function makeLayer(tex, TW, speed) {
   const tex2 = document.createElement('canvas'); tex2.width = TW * 2; tex2.height = TH;
   const g = tex2.getContext('2d'); g.drawImage(tex, 0, 0); g.drawImage(tex, TW, 0);
   return { tex2, TW, speed };
 }
 async function loadPanorama() {
-  const back = await findImages('panorama');
-  if (back.length) { const [tex, TW] = stitch(back); layers.push(makeLayer(tex, TW, 1)); }
-  else { const [tex, TW] = proceduralReef(); layers.push(makeLayer(tex, TW, 1)); }
-  const front = await findImages('foreground');
-  if (front.length) { const [tex, TW] = stitch(front); layers.push(makeLayer(tex, TW, 1.6)); }
+  const [back, front] = await Promise.all([loadAll(PANORAMA), loadAll(FOREGROUND)]);   // all six at once
+  const [tex, TW] = back.length ? stitch(back) : proceduralReef();
+  layers.push(makeLayer(tex, TW, 1));
+  if (front.length) { const [ftex, FTW] = stitch(front); layers.push(makeLayer(ftex, FTW, 1.6)); }
+  drumShown = performance.now();
 }
 function stitch(imgs) {
   const ws = imgs.map(im => Math.round(im.width * TH / im.height));
@@ -246,6 +241,7 @@ function proceduralReef() {
   g.fillStyle = 'rgba(0,0,0,.12)'; for (let i = 0; i < 400; i++) { g.beginPath(); g.arc(r() * TW, TH - r() * 60, 1 + r() * 2, 0, TAU); g.fill(); }
   // surface shimmer
   const sh = g.createLinearGradient(0, 0, 0, 80); sh.addColorStop(0, 'rgba(255,255,255,.55)'); sh.addColorStop(1, 'rgba(255,255,255,0)'); g.fillStyle = sh; g.fillRect(0, 0, TW, 80);
+  return [tex, TW];
 }
 
 // ---------------------------------------------------------------------------
@@ -431,8 +427,11 @@ function step(dt) {
 const bubbles = Array.from({ length: 14 }, () => ({ x: Math.random(), y: Math.random(), r: rand(1.5, 4), v: rand(18, 40), ph: rand(0, TAU) }));
 const rays = Array.from({ length: 5 }, (_, i) => ({ x: i / 5 + rand(0, .1), w: rand(.05, .12), v: rand(-.01, .01), ph: rand(0, TAU) }));
 function drawDrum() {
-  if (!layers.length) { ctx.fillStyle = '#0a3a7a'; ctx.fillRect(0, 0, W, H); return; }
+  const fade = layers.length ? Math.min(1, (performance.now() - drumShown) / 800) : 0;
+  if (fade < 1) { ctx.fillStyle = '#0a3a7a'; ctx.fillRect(0, 0, W, H); }
+  if (!layers.length) return;
   const strip = 3;
+  ctx.save(); ctx.globalAlpha = fade;
   for (const L of layers) {
     const k = L.TW / (2 * SF);                               // texture px per arc px (full perimeter = 2 front arcs)
     for (let x0 = 0; x0 < W; x0 += strip) {
@@ -442,6 +441,7 @@ function drawDrum() {
       ctx.drawImage(L.tex2, mod(u0, L.TW), 0, sw, TH, x0, 0, x1 - x0, H);
     }
   }
+  ctx.restore();
 }
 function draw(t) {
   drawDrum();
@@ -499,7 +499,8 @@ function frame(now) {
 resize(); spawn(); window.addEventListener('resize', resize);
 if (location.search.includes('off')) setLit(false);   // debug: night mode for screenshots
 if (location.search.includes('shark')) { mouse.in = true; mouse.down = true; mouse.x = W * 0.5; mouse.y = H * 0.5; mouse.sx = xToS(0) * A; mouse.ang = 0.2; }  // debug: predator mode for screenshots
-loadPanorama().then(() => requestAnimationFrame(frame));
+requestAnimationFrame(frame);   // fish swim straight away; the reef fades in once its images arrive
+loadPanorama();
 </script>
 </body>
 </html>
